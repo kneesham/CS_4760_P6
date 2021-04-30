@@ -16,6 +16,7 @@
 #include <time.h>
 #include <math.h>
 #include <sys/msg.h>
+#include <sys/wait.h>
 
 #include "messageType.h"     // Structure for the message queues
 #include "sharedIds.h"      
@@ -48,12 +49,10 @@ int parentPid;
 
 int main(int argc, char * argv[]) {
 
-    clock_t t; // needed to run deadlock detection algorithm.
     FILE * fp;
-    double timePassed = 0.0;
     struct msg_t messageData;
     char buff[MAX_MSG];
-    int maxSpecifiedProcesses = getUserProcessCount(argc, argv);
+    int numActive, status, maxSpecifiedProcesses = getUserProcessCount(argc, argv);
     char * logfileName = "logfile";
 
     int * frameBitVector;
@@ -69,9 +68,8 @@ int main(int argc, char * argv[]) {
     fp = fopen("logfile", "a");
     // attach to the logfile.
 
-    activeProcesses[0] = 0;
+    numActive = 0;
     // set the number of active processes to 0.
-    // number incremented when a "user_proc" is launced, also decremented when that "user_proc" terminates.
 
     int currentProcessCount = 0;
     // a counter to check the number of launched processes for the termination criteria
@@ -81,28 +79,26 @@ int main(int argc, char * argv[]) {
         // get input in an infinite loop until user types end.
         // used for scheduling and may get blocked by child process.
 
+        if( waitpid(-1, &status, WNOHANG) > 0 ) numActive--;
+        // if any child processes terminated decrement the numActive. (this does not block).
 
-        t = clock();
-
-        while(activeProcesses[0] < MAX_PROCESSES
-                && currentProcessCount < MAX_NUM_CREATED_PROC
-                && activeProcesses[0] < maxSpecifiedProcesses) {
-            // the conditions for this if statement ensure that no more than 18 processes are active
-            // fork and launch a user process.i
-
-            currentProcessCount++;
-            // increment the processes counter
+        if( numActive < maxSpecifiedProcesses  && currentProcessCount < MAX_NUM_CREATED_PROC ) {
+            // handle launching a process.
 
             if(fork() == 0) {
                 // fork a child process
+                printf("launching %d\n", currentProcessCount);
                 launchProcess(currentProcessCount, fp);
+                exit(0);
             }
-
+            currentProcessCount++;
+            numActive++;
         }
+
+
 
         msgrcv(msqid, &messageData, sizeof(messageData), 0, IPC_NOWAIT);
         // wait for a message to come back from a child proces.
-
 
 
         switch((int)messageData.msgType) {
@@ -110,7 +106,6 @@ int main(int argc, char * argv[]) {
 
             case REQ_WRITE: 
                 {
-                    printf("req write\n");
                     fprintf(fp,"%s\n", messageData.message);
                     // printf("the value of messageData.address = %d\n", messageData.address);
                     sendMsg(GRANTED, "");
@@ -121,7 +116,6 @@ int main(int argc, char * argv[]) {
 
             case REQ_READ: 
                 {
-                    printf("req read\n");
                     fprintf(fp,"%s\n", messageData.message);
                     // printf("the value of messageData.address = %d\n", messageData.address);
                     sendMsg(GRANTED, "");
@@ -131,17 +125,12 @@ int main(int argc, char * argv[]) {
                 }
         }
 
-        t = clock() - t;
-        timePassed += ((double)t)/CLOCKS_PER_SEC;
 
-
-        if((currentProcessCount >= MAX_NUM_CREATED_PROC  &&  activeProcesses[0] <= 0 )) {
+        if((currentProcessCount >= MAX_NUM_CREATED_PROC )) {
             // Terminate the OSS since there are no active processesand the termination criterion has been met.
-            printf("num created: %d\n", currentProcessCount);
+            printf("num Processes  created: %d\n", currentProcessCount);
             break;
-        }
-
-
+        } 
 
     }
 

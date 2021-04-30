@@ -41,6 +41,8 @@ int main( int argc, char * argv[]) {
     attachShmMsg();
     // setup the message queue and the shared memory.
 
+    sleep(1);
+
     if(getProbability()) {
         // address should be valid 75% of the time.
 
@@ -70,13 +72,14 @@ int main( int argc, char * argv[]) {
     }
 
 
-    rcvMsg();
-    printf("terminating\n");
+    activeCounter[0]--;
+    // decrement the counter after the program terminates.
+
+    //rcvMsg();
     // wait to receive a message before terminating.
 
 
-    activeCounter[0]--;
-    // decrement the counter after the program terminates.
+
 
 
     shmdt(activeCounter);
@@ -170,6 +173,8 @@ void attachShmMsg() {
     // set globals ids from shared ids.
 
     activeCounter = (int*) shmat(activeCounterId, NULL, 0);
+
+    if(activeCounter == NULL) perror("active counter is null:");
     activeCounter[0]++;
     // increment the counter by one to show that there is a running process.
 
