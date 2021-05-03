@@ -3,6 +3,7 @@
 
 int initbv(int **, int);
 void setbv(int *, int );
-int frameIsAllocated(int *, int);
+int clearbv(int **, int);
+int locationAllocated(int *, int);
 
 #endif

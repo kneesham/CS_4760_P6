@@ -17,6 +17,7 @@
 #include <math.h>
 #include <sys/msg.h>
 #include <sys/wait.h>
+#include <limits.h>
 
 #include "messageType.h"     // Structure for the message queues
 #include "sharedIds.h"      
@@ -24,6 +25,8 @@
 #include "pcbType.h"
 #include "bits.h"
 #include "pageTable.h"
+
+#define MAX_FRAMES 256
 
 void printHelp();
 void sendMsg(int, const char *);
@@ -33,10 +36,11 @@ void setupShmMsg();
 void launchProcess(int, FILE *);
 int getRandBetween(int, int);
 int getUserProcessCount(int, char**);
+int getIntFromString(char *,int);
 
 // Functions
 
-int sharedClockId, msqid, sharedIdsId, activeId, pcbsTableId;
+int sharedClockId, msqid, sharedIdsId, activeId, pcbsId;
 unsigned int * sharedClock;
 int * activeProcesses;
 int * sharedIds;
@@ -51,11 +55,15 @@ int main(int argc, char * argv[]) {
 
     FILE * fp;
     struct msg_t messageData;
-    char buff[MAX_MSG];
     int numActive, status, maxSpecifiedProcesses = getUserProcessCount(argc, argv);
     char * logfileName = "logfile";
 
-    int * frameBitVector;
+    int  * physicalLocations[MAX_FRAMES];
+
+    int z = 0;
+    for(; z< MAX_FRAMES; z++) initbv(&physicalLocations[z], ENTRY_SIZE ); 
+    // entry size is 1k, MAX_FRAMES is 256, so we will have 256k main memory.
+    // initialize the main memory
 
     setupShmMsg();
     // setting up shared memory and message queues.
@@ -65,7 +73,7 @@ int main(int argc, char * argv[]) {
 
     if(remove(logfileName) == 1) printf("OSS: Deleting old logfile\n");
     // remove the old log if it exists. If it dosn't this won't do anything.
-    fp = fopen("logfile", "a");
+    fp = fopen("logfile", "w+");
     // attach to the logfile.
 
     numActive = 0;
@@ -89,25 +97,67 @@ int main(int argc, char * argv[]) {
                 // fork a child process
                 printf("launching %d\n", currentProcessCount);
                 launchProcess(currentProcessCount, fp);
-                exit(0);
+                //exit(0);
             }
             currentProcessCount++;
             numActive++;
         }
 
-
-
-        msgrcv(msqid, &messageData, sizeof(messageData), 0, IPC_NOWAIT);
+        msgrcv(msqid, &messageData, sizeof(messageData), 0, MSG_NOERROR);
         // wait for a message to come back from a child proces.
-
 
         switch((int)messageData.msgType) {
             // write a different message to the logfile depending on what kind of message is sent back.
 
             case REQ_WRITE: 
                 {
+                    int frameIndex = 0;
+                    int location = 0;
+                    char temp[MAX_MSG];
+                    // used to keep the original message intact.
+
+                    fflush(fp);
                     fprintf(fp,"%s\n", messageData.message);
-                    // printf("the value of messageData.address = %d\n", messageData.address);
+                    // output the message the logfile
+
+                    strcpy(temp, messageData.message);
+
+                    location = getIntFromString(messageData.message, 8);
+                    // location of the read will be the 8th word in the message.
+                    printf("location of write %d\n", location);
+
+                    frameIndex = location >> 10;
+                    // get the location to read from.
+
+                    if(location == 999999999) {
+                        // pagefault, this number is my 'guarenteed' pagefault.
+                        fprintf(fp, "Process generated a pagefalut when requesting memory location %d\n",location);
+                        sendMsg(PAGE_FAULT,"");
+                        strcpy(messageData.message, "");
+                        messageData.msgType = 0;
+                        break;
+                    }
+
+                    if(locationAllocated(physicalLocations[frameIndex], location)){
+                        // grant the read request right away since the location is set.
+                        fprintf(fp, "Process generated a pagefalut when trying to write to memory location %d\n",location);
+                        sendMsg(PAGE_FAULT,"");
+                        strcpy(messageData.message, "");
+                        messageData.msgType = 0;
+                        break;
+
+                    } else {
+                        // location in frame is not in memory we need to advance the clock simulating bringing it from disc, then grant.
+
+                        sharedClock[CLOCK_NS]  += getRandBetween(0, 500);
+                        // increment the logical clock to simulate reading from disk.
+
+                        setbv(physicalLocations[frameIndex], location);
+                        // put the location into memory.
+                    }
+
+
+
                     sendMsg(GRANTED, "");
                     strcpy(messageData.message, "");
                     messageData.msgType = 0;
@@ -116,8 +166,46 @@ int main(int argc, char * argv[]) {
 
             case REQ_READ: 
                 {
+
+                    int frameIndex = 0;
+                    int location = 0;
+                    char temp[MAX_MSG];
+                    // used to keep the original message intact.
+
+                    fflush(fp);
                     fprintf(fp,"%s\n", messageData.message);
-                    // printf("the value of messageData.address = %d\n", messageData.address);
+
+                    strcpy(temp, messageData.message);
+
+                    location = getIntFromString(messageData.message, 8);
+                    // location of the read will be the 8th word in the message.
+
+                    frameIndex = location >> 10;
+                    // get the location to read from.
+
+                    if(location == 999999999) {
+                        // pagefault, this number is my 'guarenteed' pagefault.
+                        fprintf(fp, "Process generated a pagefalut when requesting memory location %d\n",location);
+                        sendMsg(PAGE_FAULT,"");
+                        strcpy(messageData.message, "");
+                        messageData.msgType = 0;
+
+                        break;
+                    }
+
+                    if(locationAllocated(physicalLocations[frameIndex], location)){
+                        // grant the read request right away since the location is set.
+                        printf("data read from location %d\n", location);
+                    } else {
+                        // location in frame is not in memory we need to advance the clock simulating bringing it from disc, then grant.
+
+                        sharedClock[CLOCK_NS]  += getRandBetween(0, 500);
+                        // increment the logical clock to simulate reading from disk.
+
+                        setbv(physicalLocations[frameIndex], location);
+                        // put the location into memory.
+                    }
+
                     sendMsg(GRANTED, "");
                     strcpy(messageData.message, "");
                     messageData.msgType = 0;
@@ -129,6 +217,7 @@ int main(int argc, char * argv[]) {
         if((currentProcessCount >= MAX_NUM_CREATED_PROC )) {
             // Terminate the OSS since there are no active processesand the termination criterion has been met.
             printf("num Processes  created: %d\n", currentProcessCount);
+           kill(-getpid(), 2);
             break;
         } 
 
@@ -145,6 +234,7 @@ int main(int argc, char * argv[]) {
     shmctl(sharedIdsId, IPC_RMID,NULL);
     shmctl(sharedClockId, IPC_RMID,NULL);
     shmctl(activeId, IPC_RMID, NULL);
+    shmctl(pcbsId,IPC_RMID,NULL);
     msgctl(msqid, IPC_RMID, NULL);
 
     // destroy any shared memeory, or message queues.
@@ -168,19 +258,14 @@ void setupShmMsg() {
     sharedClockId = shmget(sharedClockKey, 2 * sizeof(unsigned int), IPC_CREAT | 0666);
     sharedIdsId = shmget(sharedIdKey, 5* sizeof(int), IPC_CREAT | 0666);
     msqid = msgget(messageQueueKey, 0666 | IPC_CREAT);
-
-
-    printf("msqid oss: %d\n", msqid);
-
-
+    pcbsId = shmget(pcbsKey, MAX_PROCESSES * sizeof(pcb_t*), IPC_CREAT | 0666);
     activeId = shmget(activeKey, 1 *sizeof(int), IPC_CREAT | 0666);
-    pcbsTableId = shmget(pcbsKey, sizeof(pcb_t *) * MAX_PROCESSES, IPC_CREAT | 0666);
     // get ids.
 
     sharedClock = (unsigned int*) shmat(sharedClockId, NULL, 0);
     activeProcesses = (int * ) shmat(activeId, NULL, 0);
     sharedIds = (int * ) shmat(sharedIdsId, NULL, 0);
-    pcbs = (pcb_t *) shmat(pcbsTableId, NULL, 0);
+    pcbs = (pcb_t *) shmat(pcbsId, NULL, 0);
 
     if(sharedClockKey == -1 || messageQueueKey == -1 || sharedIdKey == -1 || activeKey == -1 || pcbsKey == -1) {
         // check for all valid keys.
@@ -188,7 +273,7 @@ void setupShmMsg() {
         exit(1);
     }
 
-    if(sharedClockId == -1 || msqid == -1 || sharedIdsId == -1 || activeId == -1 || pcbsTableId == -1){
+    if(sharedClockId == -1 || msqid == -1 || sharedIdsId == -1 || activeId == -1 || pcbsId == -1){
         // check that all ids were valid.
         perror("OSS: ERROR getting ids ");
         exit(1);
@@ -204,13 +289,12 @@ void setupShmMsg() {
     sharedIds[CLOCK_IND] = sharedClockId;
     sharedIds[MSGQ_IND] = msqid;
     sharedIds[ACTIVE_IND] = activeId;
-    sharedIds[PCB_IND] = pcbsTableId;
+    sharedIds[PCB_IND] = pcbsId;
     // store all the ids in the shared ids memory to simplify code for userProcess.c
     // doing this allows me to access all the ids created here rather than re-creating them in userProcess.c
 
 
 }
-
 
 void printHelp() {
     // Display a helpful message for the user.
@@ -223,9 +307,9 @@ void sigHandler(int signum) {
     printf("signal %d caught exiting...\n", signum);
     shmctl(sharedIdsId, IPC_RMID,NULL);
     shmctl(sharedClockId, IPC_RMID,NULL);
+    shmctl(pcbsId,IPC_RMID,NULL);
     shmctl(activeId, IPC_RMID, NULL);
     msgctl(msqid, IPC_RMID, NULL);
-    system("killall user_process");
     exit(1);
 }
 
@@ -238,13 +322,26 @@ int getRandBetween(int min, int max) {
 void launchProcess(int pid, FILE * fp) {
     // Code to launch a user process.
 
+    int  i = 0;
     char simulatedPid[3];
+    char pcbLoc[3];
+
+    for( ; i < MAX_PROCESSES; i++) {
+        if(pcbs[i].state == ready) break;
+        else if(i == MAX_PROCESSES - 1) return;
+    }
+
     sprintf(simulatedPid, "%d", pid);
-    char * processArgs[] = {"./user_proc", simulatedPid, NULL};
+    sprintf(pcbLoc, "%d", i);
+
+    char * processArgs[] = {"./user_proc", simulatedPid, pcbLoc, NULL};
 
     sharedClock[CLOCK_SEC] += getRandBetween(0, 1);
     sharedClock[CLOCK_NS]  += getRandBetween(0, 500);
     // increment the logical clock.
+
+    pcbs[i].state = running;
+    pcbs[i].simpid = pid;
 
     fflush(fp);
     fprintf(fp,"OSS launched process P%s atclock time: %d:%d\n", simulatedPid,  sharedClock[CLOCK_SEC], sharedClock[CLOCK_NS]);
@@ -253,9 +350,30 @@ void launchProcess(int pid, FILE * fp) {
 
 }
 
+int getIntFromString(char * msg, int mesageIndex) {
+    // split the message by 'words' (spaces) and depending on the messageIndex a word will be converted to integer via strtol.
+    char * endPtr, *token;
+    long requestedAddress = -1;
+    int i = 0;
+
+
+    printf("msg: %s\n", msg);
+    token = strtok(msg, " ");
+    // get the first tokend
+
+    while( token != NULL && i < mesageIndex -1) {
+        token = strtok(NULL, " ");
+        i++;
+    }
+
+    requestedAddress = strtol(token,&endPtr, 10);
+
+    return (int)requestedAddress;
+}
+
+
 int getUserProcessCount(int argc, char ** argv){
     int numProcesses = 18, option;
-
 
     while(( option = getopt(argc, argv, "hp:")) != -1) {
 
@@ -297,4 +415,5 @@ void sendMsg(int msgType, const char * message) {
         exit(0);
     }
 }
+
 

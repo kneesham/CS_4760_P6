@@ -16,75 +16,106 @@ Description:
 #include "messageType.h"
 #include "sharedIds.h"
 #include "constants.h"
+#include "pcbType.h"
+
+#define SIMPID 1
+#define PCBIND 2
 
 void sigquit_handler (int sig);
 void attachShmMsg();
-void rcvMsg();
+int rcvMsg();
 void sendMsg(int, const char *);
 int getRandBetween(int ,int );
 int getRequestType();
 int getProbability();
+void freePcb(int);
 
-int msqid, activeCounterId, sharedClockId;
+int msqid, activeCounterId, sharedClockId, pcbsId;
 int * sharedIds;
 int * activeCounter, * sharedClock;
+pcb_t * pcbs;
 
 int main( int argc, char * argv[]) {
 
-    int address;
-   //pcb_t pcb;
-   
+    int address, pcbLoc, simpid, i;
 
     signal(SIGQUIT, sigquit_handler);
     // signal handler to catch sigquit sent from oss.
-    
+
     attachShmMsg();
     // setup the message queue and the shared memory.
 
-    sleep(1);
+    pcbLoc = atoi(argv[PCBIND]);
+    simpid = atoi(argv[SIMPID]);
+    // get the index of the pcb also get the simpid
 
-    if(getProbability()) {
-        // address should be valid 75% of the time.
+    pcbs[pcbLoc].simpid = simpid;
+    pcbs[pcbLoc].pid = getpid();
+    // get the simulated pid to the pcb location.
 
-        address = getRandBetween(0, 32768);
-        // will be an integer between 0 and the limit of process memory (2^15)
+    for(i = 0; i < PAGE_SIZE; i++ ) {
+        if(getProbability()) {
+            // address should be valid 75% of the time.
+            address = getRandBetween(0, PAGE_SIZE);
+            // will be an integer between 0 and the limit of process memory (2^15)
 
-    } else {
-        // page fault should happen
-        address = 999999999;
-        // guarentee a page fault will happen since this process only has 2^15 valid frame locations
+        } else {
+            // page fault should happen
+            address = 999999999;
+            // guarentee a page fault will happen since this process only has 2^15 valid frame locations
+
+        }
+
+        if( getRequestType()) {  // 50/50 chance of being either a request or a write.
+            // handle a read request here
+            char msg[MAX_MSG];
+
+            sprintf(msg, "Process %d is requesting to read address %d at time %d:%d", getpid(), address,sharedClock[CLOCK_SEC], sharedClock[CLOCK_NS] );
+            sendMsg(REQ_READ,  msg);
+
+        } else {
+            // handle a write here.
+            char msg[MAX_MSG];
+            sprintf(msg, "Process %d is requesting write of address %d at time %d:%d", getpid(), address,sharedClock[CLOCK_SEC], sharedClock[CLOCK_NS]);
+            sendMsg(REQ_WRITE,  msg);
+        }
+
+        if( rcvMsg() == -1 ) break;
+        // wait to receive a message
+        // will terminate the process if a pagefault is returned..
 
     }
-      
-    if( getRequestType()) {  // 50/50 chance of being either a request or a write.
-       // handle a read request here
-        char msg[MAX_MSG];
 
-        sprintf(msg, "Process P%d is requesting to read address %d at time %d:%d", getpid(), address, 1, 2);
-        sendMsg(REQ_READ,  msg);
-       
-    } else {
-        // handle a write here.
-        char msg[MAX_MSG];
-        sprintf(msg, "Process P%d is requesting write of address %d at time %d:%d", getpid(), address,sharedClock[CLOCK_SEC], sharedClock[CLOCK_NS]);
-        sendMsg(REQ_WRITE,  msg);
-
-    }
-
-
-    activeCounter[0]--;
-    // decrement the counter after the program terminates.
-
-    //rcvMsg();
-    // wait to receive a message before terminating.
-
-
-
-
+    freePcb(pcbLoc);
+    // release the pcb.
 
     shmdt(activeCounter);
     shmdt(sharedClock);
+    shmdt(pcbs);
     return 0;
+}
+
+void freePcb(int i) {
+    // replace the pcb in the process table
+    pcb_t newPcb;
+    pcbs[i] = newPcb;
+}
+
+int getPcbInd(char * simpid) {
+
+    int i = -1;
+    int assigned = 0;
+
+    printf("here from userProc\n");
+    int simpidInt = atoi(simpid);
+
+    for(; i< MAX_PROCESSES; i++) {
+        if(pcbs[i].simpid == simpidInt) break;
+        if ( i == MAX_PROCESSES && !assigned) i = 0;
+    }
+
+    return i;
+
 }
 
 
@@ -102,11 +133,19 @@ int getProbability() {
     return (rand() & 1) | (rand() & 1);
 }
 
-void rcvMsg() {
-        struct msg_t messageData;
+int rcvMsg() {
+    struct msg_t messageData;
 
-        msgrcv(msqid, &messageData, sizeof(messageData), GRANTED, MSG_NOERROR);
-        // wait for a message to come back from a child proces.
+    msgrcv(msqid, &messageData, sizeof(messageData), 0, MSG_NOERROR);
+    // wait for a message to come back from a child proces.
+
+
+    switch(messageData.msgType) {
+        case GRANTED: { return 1;}
+        case PAGE_FAULT: {return -1;}
+    }
+
+    return 0;
 } 
 
 void sendMsg(int msgType, const char * message) {
@@ -123,16 +162,12 @@ void sendMsg(int msgType, const char * message) {
         // check that the message sent.
         perror("User_proc: sendMsg");
         if(errno == EIDRM) printf("errno = EIDRM");
-        activeCounter[0]--;
         exit(0);
     }
 }
 
 void sigquit_handler (int sig){
     // handle cleanup section by removing any remaining shared memory, or message queues.
-    activeCounter[0]--;
-    // decrement the counter after the program terminates.
-
     shmdt(activeCounter);
     shmdt(sharedClock);
     exit(0);
@@ -170,17 +205,14 @@ void attachShmMsg() {
     msqid = sharedIds[MSGQ_IND];
     activeCounterId = sharedIds[ACTIVE_IND];
     sharedClockId = sharedIds[CLOCK_IND];
+    pcbsId = sharedIds[PCB_IND];
     // set globals ids from shared ids.
-
-    activeCounter = (int*) shmat(activeCounterId, NULL, 0);
-
-    if(activeCounter == NULL) perror("active counter is null:");
-    activeCounter[0]++;
-    // increment the counter by one to show that there is a running process.
 
     sharedClock = (int*) shmat(sharedClockId, NULL, 0);
     // get the active counter shared memory.
 
+    pcbs = (pcb_t*) shmat(pcbsId, NULL,0);
+    // attach to the process table.
 
 }
 
