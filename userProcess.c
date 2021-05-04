@@ -37,8 +37,8 @@ pcb_t * pcbs;
 
 int main( int argc, char * argv[]) {
 
-    int address, pcbLoc, simpid, i;
-
+    int address, pcbLoc, simpid, i; 
+    int * waitQueue = (int*) calloc(MAX_PROCESSES, sizeof(int));       // stores indecies of processes in the process table
     signal(SIGQUIT, sigquit_handler);
     // signal handler to catch sigquit sent from oss.
 

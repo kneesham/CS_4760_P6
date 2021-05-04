@@ -25,6 +25,7 @@
 #include "pcbType.h"
 #include "bits.h"
 #include "pageTable.h"
+#include "frames.h"
 
 #define MAX_FRAMES 256
 
@@ -37,6 +38,7 @@ void launchProcess(int, FILE *);
 int getRandBetween(int, int);
 int getUserProcessCount(int, char**);
 int getIntFromString(char *,int);
+int secondChance(int);
 
 // Functions
 
@@ -45,10 +47,10 @@ unsigned int * sharedClock;
 int * activeProcesses;
 int * sharedIds;
 
-pcb_t * pcbs;
-// Process control blocks.
+pcb_t * pcbs;                           // process control blocks.
+frame_t  frames[MAX_FRAMES];            // actual frames to run second chance algorithm
 
-int parentPid;
+int parentPid, clearedFrame;
 //globals for signal functions to use.
 
 int main(int argc, char * argv[]) {
@@ -58,7 +60,7 @@ int main(int argc, char * argv[]) {
     int numActive, status, maxSpecifiedProcesses = getUserProcessCount(argc, argv);
     char * logfileName = "logfile";
 
-    int  * physicalLocations[MAX_FRAMES];
+    int  * physicalLocations[MAX_FRAMES];   // physical locations on the frames.
 
     int z = 0;
     for(; z< MAX_FRAMES; z++) initbv(&physicalLocations[z], ENTRY_SIZE ); 
@@ -97,7 +99,6 @@ int main(int argc, char * argv[]) {
                 // fork a child process
                 printf("launching %d\n", currentProcessCount);
                 launchProcess(currentProcessCount, fp);
-                //exit(0);
             }
             currentProcessCount++;
             numActive++;
@@ -113,6 +114,7 @@ int main(int argc, char * argv[]) {
                 {
                     int frameIndex = 0;
                     int location = 0;
+                    int reqPid = -1; // will appear as -1 in the log file if fails.
                     char temp[MAX_MSG];
                     // used to keep the original message intact.
 
@@ -122,9 +124,11 @@ int main(int argc, char * argv[]) {
 
                     strcpy(temp, messageData.message);
 
-                    location = getIntFromString(messageData.message, 8);
+                    location = getIntFromString(temp, 8);
                     // location of the read will be the 8th word in the message.
-                    printf("location of write %d\n", location);
+
+                    strcpy(temp, messageData.message);
+                    reqPid = getIntFromString(temp, 2);
 
                     frameIndex = location >> 10;
                     // get the location to read from.
@@ -138,9 +142,22 @@ int main(int argc, char * argv[]) {
                         break;
                     }
 
+
+                    // perform the second chance algorithm here.
+                    if(secondChance(frameIndex)) {
+                        // there was a pagefault here, all the dirty bits should be reset to 0.
+
+                        printf("there were no page faults\n");
+
+                    } else {
+
+                        printf("there were a page fault\n");
+                    }
+
+
                     if(locationAllocated(physicalLocations[frameIndex], location)){
                         // grant the read request right away since the location is set.
-                        fprintf(fp, "Process generated a pagefalut when trying to write to memory location %d\n",location);
+                        fprintf(fp, "Process generated a pagefault when trying to write to an existing memory location %d\n",location);
                         sendMsg(PAGE_FAULT,"");
                         strcpy(messageData.message, "");
                         messageData.msgType = 0;
@@ -152,13 +169,17 @@ int main(int argc, char * argv[]) {
                         sharedClock[CLOCK_NS]  += getRandBetween(0, 500);
                         // increment the logical clock to simulate reading from disk.
 
+                        fprintf(fp, "Address in frame %d, giving data to pid: %d\n", frameIndex, reqPid);
+
                         setbv(physicalLocations[frameIndex], location);
                         // put the location into memory.
+                        char frameIndexStr[3];
+                        sprintf(frameIndexStr, "%d", frameIndex);
+
+                        sendMsg(GRANTED, frameIndexStr);
+
                     }
 
-
-
-                    sendMsg(GRANTED, "");
                     strcpy(messageData.message, "");
                     messageData.msgType = 0;
                     break;
@@ -213,14 +234,12 @@ int main(int argc, char * argv[]) {
                 }
         }
 
-
         if((currentProcessCount >= MAX_NUM_CREATED_PROC )) {
             // Terminate the OSS since there are no active processesand the termination criterion has been met.
             printf("num Processes  created: %d\n", currentProcessCount);
-           kill(-getpid(), 2);
+            kill(-getpid(), 2);
             break;
-        } 
-
+        }
     }
 
     fclose(fp);
@@ -242,6 +261,63 @@ int main(int argc, char * argv[]) {
 
     return 0;
 }
+
+int secondChance(int reference) {
+    // check if a frame reference is in memory.
+    // if no frame in memory just put the reference in that location
+    // if there's no free spots in memory replace a pageframe using second chance.
+
+    int i;
+    int hadPageFault = 0; //true or false.
+    int oldest = -1;  //oldest index when finding which page to replace
+
+    for(i = 0; i < MAX_FRAMES; i++ ) {
+        // iterate over all the frames
+
+        if(frames[i].isEmpty == 0){ 
+            frames[i].isEmpty = 1;
+            frames[i].referenceNbr = reference;
+            frames[i].dirtyBit = 0; // set the dirty bit to 0
+            frames[i].age = 0;
+            hadPageFault = 1;   // Since we had to bring a frame into memory we generated a pagefault.
+            break;
+        }
+
+        if (frames[i].referenceNbr == reference) {
+            frames[i].dirtyBit = 1; // set the dirty bit of the frame.
+            frames[i].age++; 
+            return hadPageFault;
+        }
+
+        frames[i].age++; // increase the age of every process, is so we can know the oldest frame so we can replace it.
+    }
+
+    // replace the page.
+
+    for(i=0; i < MAX_FRAMES; i++) {
+        if(oldest < frames[i].age && !frames[i].dirtyBit) oldest = frames[i].age;
+    }
+    // get the oldest non-dirtybit page.
+
+    for(i=0; i < MAX_FRAMES; i++) {
+        if(oldest == frames[i].age) {
+            clearedFrame = frames[i].referenceNbr;
+            frames[i].isEmpty = 1;
+            frames[i].referenceNbr = reference;
+            frames[i].age = 0;
+            hadPageFault = 1;   // Since we had to bring a frame into memory we generated a pagefault.
+            break;
+        }
+    }
+
+    for(i = 0; i < MAX_FRAMES; i++) frames[i].dirtyBit = 0;
+    // set all dirty bits to 0.
+
+
+    return hadPageFault;
+}
+
+
 
 void setupShmMsg() {
 
@@ -415,5 +491,4 @@ void sendMsg(int msgType, const char * message) {
         exit(0);
     }
 }
-
 
